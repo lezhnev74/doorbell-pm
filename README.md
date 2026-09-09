@@ -1,5 +1,7 @@
 # 🔔 `doorbell-pm` Process Manager
 
+> Ring the bell, workers show up. Doorbell spawns worker processes on demand and gets out of the way.
+
 Most job runners want to own your queue, your retries and your worker code. Doorbell wants none of it. It is a small,
 predictable process spawner: your app publishes "there is work" and doorbell starts up to N copies of the command you
 configured for that pool. Workers claim jobs themselves and quit when the queue is empty, so the process count follows
@@ -37,6 +39,22 @@ fine because idle workers find no jobs and exit. A pool that keeps crashing is p
 and on shutdown every worker gets `term_signal`, then `grace_shutdown`, then SIGKILL.
 Every key with a one-line explanation of what it changes is in
 [`test/testdata/config/full.yaml`](test/testdata/config/full.yaml).
+
+## How to hint
+
+A hint is "about N jobs are waiting on this pool". It is the only input doorbell reacts to, and it can come from
+four places:
+
+- **Your app over Redis**: `PUBLISH jobs:encoding 100` after enqueuing. Fire-and-forget; lost while doorbell is
+  disconnected.
+- **Your app over HTTP**: `POST /hint` with `{"jobs:encoding": 100}`. Same shape, synchronous, gets a status code.
+- **Doorbell itself (`poke`)**: with `poke: 1m` the pool hints itself `poke_count` every minute. This is the safety net
+  for lost messages and for a backlog left behind after a [breaker](#failure-breaker) pause.
+- **The worker on exit**: a worker that exits ok and prints a number N > 0 as its last line hints the pool for N more.
+  A worker that quit on a job quota keeps a busy queue draining without the app's help.
+
+Each hint spawns `min(hint, concurrency - running)` workers. Details: [Hint sources](#hint-sources) and
+[Worker contract](#worker-contract).
 
 ## Quick start
 
@@ -78,13 +96,18 @@ curl -X POST 127.0.0.1:8080/hint -d '{"jobs:encoding": 100}'
 
 ## Worker contract
 
-A worker may print the number of tasks it processed as its last non-empty line on the pool's `result_stream` (default
-`stdout`): a non-negative integer of at most 64 bytes, anything else is ignored. On an `ok` exit with N > 0 doorbell
-hints the pool for N more workers (`source=worker`), so a worker that quit voluntarily (`--max-jobs`, quota) keeps a busy
-queue draining; exit 0 with `0` means "no work". A trailing log line on that stream silently disables the hint for that
-exit (`result_ignored` at debug is the only trace). Both child streams otherwise go to `/dev/null`. A worker that always
-exits 0 with N > 0 while doing nothing chains forever and the breaker never sees a failure; `result_stream: none` is the
-kill switch, `ttl` and `concurrency` bound the damage.
+- Doorbell starts the command; the worker claims its own jobs and exits when it wants to.
+- Exit code in `ok_exit_codes` (default `[0]`) is `ok`. Any other code or death by a signal is a `failure` and counts
+  towards the [breaker](#failure-breaker). Killed by doorbell (`ttl`, shutdown) is neutral.
+- Last non-empty line on `result_stream` (default `stdout`) may be the number of tasks processed: a non-negative
+  integer, at most 64 bytes. Anything else is ignored.
+- Exit `ok` with N > 0: doorbell hints the pool for N more workers (`source=worker`). A worker that quit on `--max-jobs`
+  or a quota keeps a busy queue draining.
+- Exit `ok` with `0` (or no number): "no work", nothing spawns.
+- A trailing log line on that stream silently disables the hint (`result_ignored` at debug is the only trace).
+- Everything else the worker prints goes to `/dev/null`; workers log to their own files.
+- Pitfall: a worker that always exits 0 with N > 0 while doing nothing chains forever and the breaker never fires.
+  `result_stream: none` is the kill switch; `ttl` and `concurrency` bound the damage.
 
 ## Hint sources
 
@@ -93,9 +116,19 @@ payload is the count as an integer. Unparsable payloads are dropped and logged. 
 backoff between `reconnect_min` and `reconnect_max`. Pub/sub is fire-and-forget: a message published while doorbell is
 disconnected is lost, which is what `poke` is for.
 
+```sh
+redis-cli PUBLISH jobs:encoding 100      # pool "encoding", about 100 jobs waiting
+```
+
 **HTTP.** `POST <hint_path>` with a JSON object of the same shape as the Redis messages. Keys must carry the
 `redis.channel_prefix`; several pools may be hinted in one request. The whole body is validated first, so a request is
 either fully accepted or fully rejected.
+
+```sh
+curl -X POST 127.0.0.1:8080/hint \
+  -H 'Content-Type: application/json' \
+  -d '{"jobs:encoding": 100, "jobs:mail": 3}'
+```
 
 | Status | Meaning                                                 |
 |--------|---------------------------------------------------------|
@@ -134,6 +167,21 @@ All on `http.addr` (default `127.0.0.1:8080`):
   listener answers 404 there). Nothing is registered when `metrics.enabled: false`.
 
 Paths are configurable via `http.hint_path`, `http.health_path`, `http.metrics_path`.
+
+## Config reference
+
+Every key with its built-in default and a one-line explanation is in
+[`test/testdata/config/full.yaml`](test/testdata/config/full.yaml).
+
+Precedence: built-in default, then `pools._defaults`, then the pool block. `env` merges across layers, lists replace.
+Unknown keys are an error. Durations are strings such as `500ms`, `30s`, `5m`; a bare `0` is allowed.
+
+Validation rules: at least one enabled pool; `concurrency >= 1`; `command` non-empty; `poke_count <= concurrency`;
+`exit_failure_threshold >= 0`; `exit_failure_window > 0`; `exit_cooldown_multiplier >= 1`;
+`exit_cooldown_max >= exit_cooldown`; `ok_exit_codes` non-empty with each code in 0..255; known signal name;
+`result_stream` is `stdout`, `stderr` or `none`; `http.addr` required when http is enabled, `redis.addr` when redis is
+enabled; http paths start with `/` and are distinct; pool `channel` unique; `command` and `channel` are rejected in
+`_defaults`.
 
 ## Failure breaker
 
@@ -224,70 +272,6 @@ series is pre-initialised at startup so zeros are visible before the first event
 | `<ns>_redis_reconnects_total`                     |                       |                                            |
 
 Default `go_*` and `process_*` collectors stay on.
-
-## Config reference
-
-Built-in default applies when a key is absent; `pools._defaults` overrides it for every pool; a pool block overrides
-`_defaults`. `env` merges across layers, lists replace. Unknown keys are an error. Pool names must match
-`^[A-Za-z0-9][A-Za-z0-9_.-]*$`; names starting with `_` are reserved. Durations are strings such as `500ms`, `30s`,
-`5m`; a bare `0` is allowed.
-
-| Key                                    | Default                         |
-|----------------------------------------|---------------------------------|
-| `log.format`                           | `text`                          |
-| `log.level`                            | `info`                          |
-| `log.timestamp_format`                 | `2006-01-02T15:04:05.000Z07:00` |
-| `http.enabled`                         | `true`                          |
-| `http.addr`                            | `127.0.0.1:8080`                |
-| `http.hint_path`                       | `/hint`                         |
-| `http.health_path`                     | `/healthz`                      |
-| `http.metrics_path`                    | `/metrics`                      |
-| `http.read_timeout`                    | `5s`                            |
-| `http.write_timeout`                   | `5s`                            |
-| `http.shutdown_timeout`                | `5s`                            |
-| `redis.enabled`                        | `true`                          |
-| `redis.addr`                           | `127.0.0.1:6379`                |
-| `redis.username`                       | `""`                            |
-| `redis.password`                       | `""`                            |
-| `redis.db`                             | `0`                             |
-| `redis.tls`                            | `false`                         |
-| `redis.channel_prefix`                 | `jobs:`                         |
-| `redis.dial_timeout`                   | `5s`                            |
-| `redis.reconnect_min`                  | `500ms`                         |
-| `redis.reconnect_max`                  | `30s`                           |
-| `metrics.enabled`                      | `true`                          |
-| `metrics.namespace`                    | `doorbell`                      |
-| `metrics.addr`                         | `""` (main listener)            |
-| `shutdown_timeout`                     | `60s`                           |
-| `pools._defaults.*` / `pools.<name>.*` |                                 |
-| `enabled`                              | `true`                          |
-| `channel`                              | pool name                       |
-| `concurrency`                          | `1`                             |
-| `command`                              | required (pool only)            |
-| `ok_exit_codes`                        | `[0]`                           |
-| `exit_failure_threshold`               | `3`                             |
-| `exit_failure_window`                  | `10s`                           |
-| `exit_cooldown`                        | `5s`                            |
-| `exit_cooldown_max`                    | `5m`                            |
-| `exit_cooldown_multiplier`             | `2`                             |
-| `ttl`                                  | `0` (forever)                   |
-| `poke`                                 | `0` (off)                       |
-| `poke_count`                           | `1`                             |
-| `grace_shutdown`                       | `30s`                           |
-| `term_signal`                          | `SIGTERM`                       |
-| `inherit_env`                          | `true`                          |
-| `env`                                  | `{}`                            |
-| `dir`                                  | `""` (inherit)                  |
-| `result_stream`                        | `stdout`                        |
-
-Validation rules: at least one enabled pool; `concurrency >= 1`; `command` non-empty; `poke_count <= concurrency`;
-`exit_failure_threshold >= 0`; `exit_failure_window > 0`; `exit_cooldown_multiplier >= 1`;
-`exit_cooldown_max >= exit_cooldown`; `ok_exit_codes` non-empty with each code in 0..255; known signal name;
-`result_stream` is `stdout`, `stderr` or `none`; `log.child_output` is rejected with a message naming `result_stream`;
-`http.addr` required when http is enabled, `redis.addr` when redis is enabled; http paths start with `/` and are
-distinct; pool `channel` unique; `command` and `channel` are rejected in `_defaults`.
-
-A full example with every key is in [`test/testdata/config/full.yaml`](test/testdata/config/full.yaml).
 
 ## Deployment
 
