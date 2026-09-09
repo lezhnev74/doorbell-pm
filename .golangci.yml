@@ -1,0 +1,21 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - gocritic
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - os.RemoveAll
+        - (io.Closer).Close
+        - (net.Listener).Close
+        - (*os.File).Close
+        - (*github.com/redis/go-redis/v9.Client).Close
+        - (*github.com/redis/go-redis/v9.PubSub).Close

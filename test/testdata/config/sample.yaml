@@ -1,0 +1,33 @@
+# Sample from orchestrator.md (minus spawn_cooldown, which is not a config key).
+redis:
+  addr: "127.0.0.1:6379"
+  channel_prefix: "jobs:"        # subscribes to jobs:<pool>
+
+pools:
+  _defaults:
+    grace_shutdown: 30s          # SIGTERM -> wait -> SIGKILL
+
+  encoding:
+    concurrency: 4               # max simultaneous processes
+    command:
+      - php
+      - worker.php
+      - --queue=encoding
+      - --drain                  # opaque to the orchestrator
+      - --max-jobs=100
+
+  reports:
+    concurrency: 2
+    command:
+      - php
+      - worker.php
+      - --queue=reports
+      - --once
+
+  mail:
+    concurrency: 8
+    command:
+      - php
+      - worker.php
+      - --queue=mail
+      - --drain

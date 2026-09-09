@@ -1,0 +1,60 @@
+log:
+  format: text
+  level: info
+  timestamp_format: "2006-01-02T15:04:05.000Z07:00"
+
+http:
+  enabled: true
+  addr: "127.0.0.1:8080"
+  hint_path: /hint
+  health_path: /healthz
+  metrics_path: /metrics
+  read_timeout: 5s
+  write_timeout: 5s
+  shutdown_timeout: 5s
+
+redis:
+  enabled: true
+  addr: "127.0.0.1:6379"
+  username: ""
+  password: "${REDIS_PASSWORD}"
+  db: 0
+  tls: false
+  channel_prefix: "jobs:"
+  dial_timeout: 5s
+  reconnect_min: 500ms
+  reconnect_max: 30s
+
+metrics:
+  enabled: true
+  namespace: doorbell
+  addr: ""
+
+shutdown_timeout: 60s
+
+pools:
+  _defaults:
+    concurrency: 1
+    ok_exit_codes: [0]
+    exit_failure_threshold: 3
+    exit_failure_window: 10s
+    exit_cooldown: 5s
+    exit_cooldown_max: 5m
+    exit_cooldown_multiplier: 2
+    ttl: 0
+    poke: 0
+    poke_count: 1
+    grace_shutdown: 30s
+    term_signal: SIGTERM
+    inherit_env: true
+    env: {}
+    dir: ""
+    result_stream: stdout
+
+  encoding:
+    enabled: true
+    channel: encoding
+    concurrency: 4
+    ttl: 10m
+    env: { PHP_MEMORY_LIMIT: 512M }
+    command: [php, worker.php, --queue=encoding, --drain]
