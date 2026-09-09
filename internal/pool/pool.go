@@ -183,62 +183,88 @@ func (p *Pool) spec() proc.Spec {
 	}
 }
 
+// exitRecord is what reap learned about one finished worker.
+type exitRecord struct {
+	pid        int
+	exit       proc.Exit
+	killReason string // "" when the worker ended by itself
+	result     string // ok, failure or killed
+	running    int    // workers left after this one
+	duration   time.Duration
+	tasks      int
+	hasTasks   bool
+}
+
 // reap waits for one worker to end, releases its slot, feeds the breaker and,
 // when the worker reported tasks on an ok exit, hints the pool for as many
 // more. It is the only reader of pr.Done, so it also owns the ttl kill.
 func (p *Pool) reap(pr proc.Process, started time.Time, ttl clock.Timer) {
 	defer p.reapers.Done()
-	exit, killReason := p.wait(pr, ttl)
-	tasks, hasTasks := parseTasks(exit.Result)
+	r := exitRecord{pid: pr.PID()}
+	r.exit, r.killReason = p.wait(pr, ttl)
+	r.tasks, r.hasTasks = parseTasks(r.exit.Result)
 
 	exitedAt := p.clock.Now()
-	p.mu.Lock()
-	p.running--
-	running := p.running
-	p.lastExit = exitedAt
-	p.lastExitCode = exit.Code
-	if hasTasks {
-		p.lastTasks = tasks
-		p.hasLastTasks = true
+	r.result, r.running = p.recordExit(r, exitedAt)
+	r.duration = exitedAt.Sub(started)
+	p.metrics.Exit(p.cfg.Name, r.result, exitCode(r.exit, r.killReason), r.duration)
+	if r.hasTasks {
+		p.metrics.Tasks(p.cfg.Name, r.tasks)
 	}
-	result := p.classify(exit, killReason != "")
-	switch result {
-	case "ok":
-		p.breaker.ok(exitedAt)
-	case "failure":
-		p.failureLocked("code", exit.Code)
-	}
-	p.mu.Unlock()
-	duration := exitedAt.Sub(started)
-	p.metrics.Exit(p.cfg.Name, result, exitCode(exit, killReason), duration)
-	if hasTasks {
-		p.metrics.Tasks(p.cfg.Name, tasks)
-	}
-
-	attrs := []any{"pid", pr.PID(), "code", exit.Code, "result", result, "running", running, "duration", duration}
-	if killReason != "" {
-		attrs = append(attrs, "reason", killReason)
-	}
-	if exit.Signal != nil {
-		attrs = append(attrs, "signal", signalName(exit.Signal))
-	}
-	if exit.Err != nil {
-		attrs = append(attrs, "err", exit.Err)
-	}
-	if hasTasks {
-		attrs = append(attrs, "tasks", tasks)
-	}
-	p.log.Info("exit", attrs...)
-	if !hasTasks && exit.Result != "" {
-		p.log.Debug("result_ignored", "pid", pr.PID(), "line", exit.Result)
-	}
+	p.logExit(r)
 
 	// A worker that quit voluntarily after N tasks probably left more
 	// behind. Hint takes the mutex, so this runs after the unlock; the
 	// breaker, the cap and shutdown apply as to any other hint.
-	if result == "ok" && tasks > 0 {
-		p.Hint(context.Background(), hint.SourceWorker, tasks)
+	if r.result == "ok" && r.tasks > 0 {
+		p.Hint(context.Background(), hint.SourceWorker, r.tasks)
 	}
+}
+
+// recordExit updates the pool state and the breaker under the lock and
+// returns the exit classification and the remaining worker count.
+func (p *Pool) recordExit(r exitRecord, exitedAt time.Time) (result string, running int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.running--
+	p.lastExit = exitedAt
+	p.lastExitCode = r.exit.Code
+	if r.hasTasks {
+		p.lastTasks = r.tasks
+		p.hasLastTasks = true
+	}
+	result = p.classify(r.exit, r.killReason != "")
+	switch result {
+	case "ok":
+		p.breaker.ok(exitedAt)
+	case "failure":
+		p.failureLocked("code", r.exit.Code)
+	}
+	return result, p.running
+}
+
+func (p *Pool) logExit(r exitRecord) {
+	p.log.Info("exit", r.attrs()...)
+	if !r.hasTasks && r.exit.Result != "" {
+		p.log.Debug("result_ignored", "pid", r.pid, "line", r.exit.Result)
+	}
+}
+
+func (r exitRecord) attrs() []any {
+	attrs := []any{"pid", r.pid, "code", r.exit.Code, "result", r.result, "running", r.running, "duration", r.duration}
+	if r.killReason != "" {
+		attrs = append(attrs, "reason", r.killReason)
+	}
+	if r.exit.Signal != nil {
+		attrs = append(attrs, "signal", signalName(r.exit.Signal))
+	}
+	if r.exit.Err != nil {
+		attrs = append(attrs, "err", r.exit.Err)
+	}
+	if r.hasTasks {
+		attrs = append(attrs, "tasks", r.tasks)
+	}
+	return attrs
 }
 
 // wait blocks until pr ends on its own, ttl (nil = never) fires or the pool

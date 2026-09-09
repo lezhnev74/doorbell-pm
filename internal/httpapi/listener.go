@@ -55,7 +55,13 @@ func (l *listener) serve(ctx context.Context, addr string, h http.Handler) error
 	case err := <-errc:
 		return err
 	case <-ctx.Done():
+		return l.shutdown(srv, errc)
 	}
+}
+
+// shutdown drains srv for up to cfg.ShutdownTimeout, closing it outright
+// when that runs out, and reports how Serve ended.
+func (l *listener) shutdown(srv *http.Server, errc <-chan error) error {
 	stopCtx, cancel := context.WithTimeout(context.Background(), l.cfg.ShutdownTimeout.Std())
 	defer cancel()
 	if err := srv.Shutdown(stopCtx); err != nil {

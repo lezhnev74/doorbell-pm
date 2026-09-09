@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 
+	"doorbell-pm/internal/clock"
 	"doorbell-pm/internal/hint"
 )
 
@@ -19,19 +20,26 @@ func (p *Pool) Start(ctx context.Context) {
 	go func() {
 		defer p.bg.Done()
 		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-p.stop:
-				return
-			case <-t.C():
-			}
-			if ctx.Err() != nil {
-				return
-			}
-			n := p.Hint(ctx, hint.SourcePoke, p.cfg.PokeCount)
-			p.log.Debug("hint", "source", hint.SourcePoke, "channel", p.cfg.Channel, "count", p.cfg.PokeCount, "spawned", n)
-		}
+		p.pokeLoop(ctx, t)
 	}()
+}
+
+func (p *Pool) pokeLoop(ctx context.Context, t clock.Ticker) {
+	for p.awaitTick(ctx, t) {
+		n := p.Hint(ctx, hint.SourcePoke, p.cfg.PokeCount)
+		p.log.Debug("hint", "source", hint.SourcePoke, "channel", p.cfg.Channel, "count", p.cfg.PokeCount, "spawned", n)
+	}
+}
+
+// awaitTick blocks until the next tick and reports whether the pool is still
+// running; false once ctx ends or Shutdown is called.
+func (p *Pool) awaitTick(ctx context.Context, t clock.Ticker) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-p.stop:
+		return false
+	case <-t.C():
+		return ctx.Err() == nil
+	}
 }

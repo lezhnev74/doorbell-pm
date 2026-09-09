@@ -14,7 +14,7 @@ func Terminate(p Process, sig os.Signal, grace time.Duration) Exit {
 	if sig == nil {
 		sig = syscall.SIGTERM
 	}
-	if err := p.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if !deliver(p, sig) {
 		return kill(p)
 	}
 	select {
@@ -23,6 +23,13 @@ func Terminate(p Process, sig os.Signal, grace time.Duration) Exit {
 	case <-time.After(grace):
 		return kill(p)
 	}
+}
+
+// deliver reports whether sig reached p. A process that is already gone
+// counts as delivered: Done fires without help.
+func deliver(p Process, sig os.Signal) bool {
+	err := p.Signal(sig)
+	return err == nil || errors.Is(err, os.ErrProcessDone)
 }
 
 // kill ends the group and waits for the leader to be reaped. Done is

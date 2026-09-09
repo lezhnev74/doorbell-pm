@@ -112,14 +112,21 @@ func (p *execProcess) wait() {
 // exitFrom maps the result of Wait onto Exit. A wait delay expiry still
 // carries a valid ProcessState, so it is not reported as an error.
 func exitFrom(state *os.ProcessState, err error) Exit {
-	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
-		var ee *exec.ExitError
-		if !errors.As(err, &ee) {
-			return Exit{Code: -1, Err: err}
-		}
+	if waitFailed(err) {
+		return Exit{Code: -1, Err: err}
 	}
 	if ws, ok := state.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
 		return Exit{Code: -1, Signal: ws.Signal()}
 	}
 	return Exit{Code: state.ExitCode()}
+}
+
+// waitFailed is true when Wait itself failed, as opposed to reporting a
+// non-zero exit or a wait delay expiry.
+func waitFailed(err error) bool {
+	if err == nil || errors.Is(err, exec.ErrWaitDelay) {
+		return false
+	}
+	var ee *exec.ExitError
+	return !errors.As(err, &ee)
 }

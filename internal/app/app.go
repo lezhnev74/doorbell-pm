@@ -60,13 +60,7 @@ func newApp(cfg config.Config, version string, log *slog.Logger, clk clock.Clock
 		sources: map[string]hint.Source{},
 	}
 	cfgs := cfg.ResolvedPools()
-	var names, channels []string
-	for _, pc := range cfgs {
-		if pc.Enabled {
-			names = append(names, pc.Name)
-			channels = append(channels, pc.Channel)
-		}
-	}
+	names, channels := enabledPools(cfgs)
 
 	// Typed nils would not be nil behind the interfaces, so keep each one
 	// untyped while metrics are off.
@@ -81,30 +75,55 @@ func newApp(cfg config.Config, version string, log *slog.Logger, clk clock.Clock
 		poolMetrics, dispMetrics, redisMetrics, handler = m, m, m, m.Handler()
 	}
 
+	hinters := a.newPools(cfgs, spawnerFor, clk, poolMetrics)
+	a.dispatcher = NewDispatcher(cfgs, hinters, log, dispMetrics)
+	a.newSources(channels, clk, handler, redisMetrics)
+	return a
+}
+
+// enabledPools lists the names and channels of the enabled pools, in order.
+func enabledPools(cfgs []config.PoolConfig) (names, channels []string) {
+	for _, pc := range cfgs {
+		if pc.Enabled {
+			names = append(names, pc.Name)
+			channels = append(channels, pc.Channel)
+		}
+	}
+	return names, channels
+}
+
+// newPools builds one pool per enabled config and returns them as hinters
+// for the dispatcher.
+func (a *App) newPools(cfgs []config.PoolConfig, spawnerFor SpawnerFunc, clk clock.Clock, m pool.Metrics) map[string]Hinter {
 	hinters := map[string]Hinter{}
 	for _, pc := range cfgs {
 		if !pc.Enabled {
 			continue
 		}
-		p := pool.New(pc, spawnerFor(pc), clk, log, poolMetrics)
+		p := pool.New(pc, spawnerFor(pc), clk, a.log, m)
 		a.pools[pc.Name] = p
 		hinters[pc.Name] = p
 	}
-	a.dispatcher = NewDispatcher(cfgs, hinters, log, dispMetrics)
+	return hinters
+}
 
-	mainMetrics := handler
-	if handler != nil && cfg.Metrics.Addr != "" {
-		a.metrics = httpapi.NewMetricsServer(cfg.HTTP, cfg.Metrics.Addr, handler, log)
+// newSources wires the hint sources and the listeners. The metrics handler
+// goes to its own listener when metrics.addr is set, otherwise onto the
+// hint listener.
+func (a *App) newSources(channels []string, clk clock.Clock, metricsHandler http.Handler, redisMetrics redisin.Metrics) {
+	cfg := a.cfg
+	mainMetrics := metricsHandler
+	if metricsHandler != nil && cfg.Metrics.Addr != "" {
+		a.metrics = httpapi.NewMetricsServer(cfg.HTTP, cfg.Metrics.Addr, metricsHandler, a.log)
 		mainMetrics = nil
 	}
 	if cfg.HTTP.IsEnabled() {
-		a.http = httpapi.New(cfg.HTTP, cfg.Redis.ChannelPrefix, channels, a.stats, mainMetrics, log)
+		a.http = httpapi.New(cfg.HTTP, cfg.Redis.ChannelPrefix, channels, a.stats, mainMetrics, a.log)
 		a.sources[hint.SourceHTTP] = a.http
 	}
 	if cfg.Redis.IsEnabled() {
-		a.sources[hint.SourceRedis] = redisin.New(cfg.Redis, clk, log, redisMetrics)
+		a.sources[hint.SourceRedis] = redisin.New(cfg.Redis, clk, a.log, redisMetrics)
 	}
-	return a
 }
 
 // MetricsAddr is the bound address of the standalone metrics listener,
@@ -152,27 +171,7 @@ func (a *App) Run(ctx context.Context) error {
 		defer close(dispatched)
 		a.dispatcher.Run(runCtx, hints)
 	}()
-
-	var sources sync.WaitGroup
-	errc := make(chan error, len(a.sources)+1)
-	for name, src := range a.sources {
-		sources.Add(1)
-		go func() {
-			defer sources.Done()
-			if err := src.Run(runCtx, hints); err != nil {
-				errc <- fmt.Errorf("%s source: %w", name, err)
-			}
-		}()
-	}
-	if a.metrics != nil {
-		sources.Add(1)
-		go func() {
-			defer sources.Done()
-			if err := a.metrics.Run(runCtx); err != nil {
-				errc <- fmt.Errorf("metrics listener: %w", err)
-			}
-		}()
-	}
+	sources, errc := a.startSources(runCtx, hints)
 	a.log.Info("started", "pools", len(a.pools), "sources", len(a.sources))
 
 	var errs []error
@@ -186,20 +185,54 @@ func (a *App) Run(ctx context.Context) error {
 
 	stopCtx, cancel := context.WithTimeout(context.Background(), a.cfg.ShutdownTimeout.Std())
 	defer cancel()
-
 	stopRun()
-	if err := await(stopCtx, sources.Wait); err != nil {
+	errs = append(errs, a.stop(stopCtx, sources, dispatched, errc)...)
+	return errors.Join(errs...)
+}
+
+// startSources runs every hint source and the standalone metrics listener in
+// the background. The first failure of each lands in errc, which has room
+// for all of them.
+func (a *App) startSources(ctx context.Context, hints chan hint.Hint) (*sync.WaitGroup, chan error) {
+	var wg sync.WaitGroup
+	errc := make(chan error, len(a.sources)+1)
+	for name, src := range a.sources {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := src.Run(ctx, hints); err != nil {
+				errc <- fmt.Errorf("%s source: %w", name, err)
+			}
+		}()
+	}
+	if a.metrics != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := a.metrics.Run(ctx); err != nil {
+				errc <- fmt.Errorf("metrics listener: %w", err)
+			}
+		}()
+	}
+	return &wg, errc
+}
+
+// stop waits for the sources and the dispatcher, then terminates the pools,
+// every step bounded by ctx. Failures that raced the run context are
+// reported too, since the sources are done by then.
+func (a *App) stop(ctx context.Context, sources *sync.WaitGroup, dispatched <-chan struct{}, errc chan error) []error {
+	var errs []error
+	if err := await(ctx, sources.Wait); err != nil {
 		errs = append(errs, fmt.Errorf("stop sources: %w", err))
 	}
-	if err := await(stopCtx, func() { <-dispatched }); err != nil {
+	if err := await(ctx, func() { <-dispatched }); err != nil {
 		errs = append(errs, fmt.Errorf("stop dispatcher: %w", err))
 	}
-	errs = append(errs, a.shutdownPools(stopCtx)...)
-	// Sources are done; report a late failure that raced ctx.
+	errs = append(errs, a.shutdownPools(ctx)...)
 	for len(errc) > 0 {
 		errs = append(errs, <-errc)
 	}
-	return errors.Join(errs...)
+	return errs
 }
 
 // shutdownPools terminates every pool concurrently and collects the errors.

@@ -226,13 +226,28 @@ func mergeEnv(layers ...map[string]string) map[string]string {
 	return out
 }
 
+// badFn records one validation error under a config key.
+type badFn func(key, format string, args ...any)
+
 // validate checks the document after applyDefaults.
 func (c Config) validate() error {
 	var errs []error
 	bad := func(key, format string, args ...any) {
 		errs = append(errs, fmt.Errorf("%s: %s", key, fmt.Sprintf(format, args...)))
 	}
+	c.validateLog(bad)
+	c.validateSources(bad)
+	if c.Metrics.IsEnabled() && c.Metrics.Namespace == "" {
+		bad("metrics.namespace", "must not be empty")
+	}
+	if c.ShutdownTimeout <= 0 {
+		bad("shutdown_timeout", "must be > 0, got %s", c.ShutdownTimeout)
+	}
+	c.validatePools(bad)
+	return errors.Join(errs...)
+}
 
+func (c Config) validateLog(bad badFn) {
 	switch c.Log.Format {
 	case "text", "json":
 	default:
@@ -245,73 +260,81 @@ func (c Config) validate() error {
 	if c.Log.TimestampFormat == "" {
 		bad("log.timestamp_format", "must not be empty")
 	}
+}
 
+func (c Config) validateSources(bad badFn) {
 	if !c.HTTP.IsEnabled() && !c.Redis.IsEnabled() {
 		bad("http.enabled/redis.enabled", "at least one hint source must be enabled")
 	}
 	if c.HTTP.IsEnabled() {
-		if c.HTTP.Addr == "" {
-			bad("http.addr", "required when http is enabled")
-		}
-		paths := map[string]string{
-			"http.hint_path":    c.HTTP.HintPath,
-			"http.health_path":  c.HTTP.HealthPath,
-			"http.metrics_path": c.HTTP.MetricsPath,
-		}
-		seen := map[string]string{}
-		for _, key := range []string{"http.hint_path", "http.health_path", "http.metrics_path"} {
-			p := paths[key]
-			if !strings.HasPrefix(p, "/") {
-				bad(key, "must start with /, got %q", p)
-			}
-			if other, dup := seen[p]; dup {
-				bad(key, "%q is already used by %s", p, other)
-			}
-			seen[p] = key
-		}
-		for key, d := range map[string]Duration{
-			"http.read_timeout":     c.HTTP.ReadTimeout,
-			"http.write_timeout":    c.HTTP.WriteTimeout,
-			"http.shutdown_timeout": c.HTTP.ShutdownTimeout,
-		} {
-			if d < 0 {
-				bad(key, "must be >= 0, got %s", d)
-			}
-		}
+		c.validateHTTP(bad)
 	}
-
 	if c.Redis.IsEnabled() {
-		if c.Redis.Addr == "" {
-			bad("redis.addr", "required when redis is enabled")
-		}
-		if c.Redis.DB < 0 {
-			bad("redis.db", "must be >= 0, got %d", c.Redis.DB)
-		}
-		if c.Redis.DialTimeout < 0 {
-			bad("redis.dial_timeout", "must be >= 0, got %s", c.Redis.DialTimeout)
-		}
-		if c.Redis.ReconnectMin <= 0 {
-			bad("redis.reconnect_min", "must be > 0, got %s", c.Redis.ReconnectMin)
-		}
-		if c.Redis.ReconnectMax < c.Redis.ReconnectMin {
-			bad("redis.reconnect_max", "must be >= reconnect_min (%s), got %s", c.Redis.ReconnectMin, c.Redis.ReconnectMax)
-		}
+		c.validateRedis(bad)
 	}
+}
 
-	if c.Metrics.IsEnabled() && c.Metrics.Namespace == "" {
-		bad("metrics.namespace", "must not be empty")
+func (c Config) validateHTTP(bad badFn) {
+	if c.HTTP.Addr == "" {
+		bad("http.addr", "required when http is enabled")
 	}
-	if c.ShutdownTimeout <= 0 {
-		bad("shutdown_timeout", "must be > 0, got %s", c.ShutdownTimeout)
+	c.validateHTTPPaths(bad)
+	for key, d := range map[string]Duration{
+		"http.read_timeout":     c.HTTP.ReadTimeout,
+		"http.write_timeout":    c.HTTP.WriteTimeout,
+		"http.shutdown_timeout": c.HTTP.ShutdownTimeout,
+	} {
+		if d < 0 {
+			bad(key, "must be >= 0, got %s", d)
+		}
 	}
+}
 
-	enabled := 0
+func (c Config) validateHTTPPaths(bad badFn) {
+	paths := map[string]string{
+		"http.hint_path":    c.HTTP.HintPath,
+		"http.health_path":  c.HTTP.HealthPath,
+		"http.metrics_path": c.HTTP.MetricsPath,
+	}
+	seen := map[string]string{}
+	for _, key := range []string{"http.hint_path", "http.health_path", "http.metrics_path"} {
+		p := paths[key]
+		if !strings.HasPrefix(p, "/") {
+			bad(key, "must start with /, got %q", p)
+		}
+		if other, dup := seen[p]; dup {
+			bad(key, "%q is already used by %s", p, other)
+		}
+		seen[p] = key
+	}
+}
+
+func (c Config) validateRedis(bad badFn) {
+	if c.Redis.Addr == "" {
+		bad("redis.addr", "required when redis is enabled")
+	}
+	if c.Redis.DB < 0 {
+		bad("redis.db", "must be >= 0, got %d", c.Redis.DB)
+	}
+	if c.Redis.DialTimeout < 0 {
+		bad("redis.dial_timeout", "must be >= 0, got %s", c.Redis.DialTimeout)
+	}
+	c.validateRedisBackoff(bad)
+}
+
+func (c Config) validateRedisBackoff(bad badFn) {
+	if c.Redis.ReconnectMin <= 0 {
+		bad("redis.reconnect_min", "must be > 0, got %s", c.Redis.ReconnectMin)
+	}
+	if c.Redis.ReconnectMax < c.Redis.ReconnectMin {
+		bad("redis.reconnect_max", "must be >= reconnect_min (%s), got %s", c.Redis.ReconnectMin, c.Redis.ReconnectMax)
+	}
+}
+
+func (c Config) validatePools(bad badFn) {
 	channels := map[string]string{}
 	for _, p := range c.ResolvedPools() {
 		key := "pools." + p.Name
-		if p.Enabled {
-			enabled++
-		}
 		if owner, dup := channels[p.Channel]; dup {
 			bad(key+".channel", "%q is already used by %s", p.Channel, owner)
 		}
@@ -320,11 +343,19 @@ func (c Config) validate() error {
 			bad(key+"."+e.key, "%s", e.msg)
 		}
 	}
-	if enabled == 0 {
+	if c.enabledPools() == 0 {
 		bad("pools", "at least one enabled pool is required")
 	}
+}
 
-	return errors.Join(errs...)
+func (c Config) enabledPools() int {
+	n := 0
+	for _, p := range c.ResolvedPools() {
+		if p.Enabled {
+			n++
+		}
+	}
+	return n
 }
 
 type poolErr struct{ key, msg string }
@@ -335,7 +366,15 @@ func (p PoolConfig) validate() []poolErr {
 	bad := func(key, format string, args ...any) {
 		errs = append(errs, poolErr{key, fmt.Sprintf(format, args...)})
 	}
+	p.validateSpawn(bad)
+	p.validateExitCodes(bad)
+	p.validateBreaker(bad)
+	p.validateCooldown(bad)
+	p.validateProcess(bad)
+	return errs
+}
 
+func (p PoolConfig) validateSpawn(bad badFn) {
 	if len(p.Command) == 0 {
 		bad("command", "must not be empty")
 	}
@@ -345,6 +384,9 @@ func (p PoolConfig) validate() []poolErr {
 	if p.PokeCount < 0 || p.PokeCount > p.Concurrency {
 		bad("poke_count", "must be 0..concurrency (%d), got %d", p.Concurrency, p.PokeCount)
 	}
+}
+
+func (p PoolConfig) validateExitCodes(bad badFn) {
 	if len(p.OkExitCodes) == 0 {
 		bad("ok_exit_codes", "must not be empty")
 	}
@@ -353,12 +395,18 @@ func (p PoolConfig) validate() []poolErr {
 			bad("ok_exit_codes", "codes must be 0..255, got %d", code)
 		}
 	}
+}
+
+func (p PoolConfig) validateBreaker(bad badFn) {
 	if p.ExitFailureThreshold < 0 {
 		bad("exit_failure_threshold", "must be >= 0, got %d", p.ExitFailureThreshold)
 	}
 	if p.ExitFailureWindow <= 0 {
 		bad("exit_failure_window", "must be > 0, got %s", p.ExitFailureWindow)
 	}
+}
+
+func (p PoolConfig) validateCooldown(bad badFn) {
 	if p.ExitCooldown < 0 {
 		bad("exit_cooldown", "must be >= 0, got %s", p.ExitCooldown)
 	}
@@ -368,6 +416,9 @@ func (p PoolConfig) validate() []poolErr {
 	if p.ExitCooldownMultiplier < 1 {
 		bad("exit_cooldown_multiplier", "must be >= 1, got %g", p.ExitCooldownMultiplier)
 	}
+}
+
+func (p PoolConfig) validateProcess(bad badFn) {
 	for key, d := range map[string]time.Duration{"ttl": p.TTL, "poke": p.Poke, "grace_shutdown": p.GraceShutdown} {
 		if d < 0 {
 			bad(key, "must be >= 0, got %s", d)
@@ -381,5 +432,4 @@ func (p PoolConfig) validate() []poolErr {
 	default:
 		bad("result_stream", "must be stdout, stderr or none, got %q", p.ResultStream)
 	}
-	return errs
 }

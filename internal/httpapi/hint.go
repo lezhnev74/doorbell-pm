@@ -60,16 +60,26 @@ func (s *Server) parseHints(body io.Reader) ([]hint.Hint, error) {
 	}
 	hints := make([]hint.Hint, 0, len(raw))
 	for key, count := range raw {
-		if count < 0 {
-			return nil, badRequest("%q: count must be >= 0, got %d", key, count)
+		h, err := s.parseHint(key, count)
+		if err != nil {
+			return nil, err
 		}
-		channel, ok := strings.CutPrefix(key, s.prefix)
-		if _, known := s.channels[channel]; !ok || !known {
-			return nil, &requestError{status: http.StatusNotFound, msg: fmt.Sprintf("%q: unknown pool", key)}
-		}
-		hints = append(hints, hint.Hint{Source: hint.SourceHTTP, Pool: channel, Count: count})
+		hints = append(hints, h)
 	}
 	return hints, nil
+}
+
+// parseHint validates one body entry: key is a prefixed channel of a known
+// pool and count is non-negative.
+func (s *Server) parseHint(key string, count int) (hint.Hint, error) {
+	if count < 0 {
+		return hint.Hint{}, badRequest("%q: count must be >= 0, got %d", key, count)
+	}
+	channel, ok := strings.CutPrefix(key, s.prefix)
+	if _, known := s.channels[channel]; !ok || !known {
+		return hint.Hint{}, &requestError{status: http.StatusNotFound, msg: fmt.Sprintf("%q: unknown pool", key)}
+	}
+	return hint.Hint{Source: hint.SourceHTTP, Pool: channel, Count: count}, nil
 }
 
 func (s *Server) reject(w http.ResponseWriter, r *http.Request, err error) {

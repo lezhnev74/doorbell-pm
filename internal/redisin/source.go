@@ -98,13 +98,7 @@ func (s *Source) session(ctx context.Context, out chan<- hint.Hint) (subscribed 
 
 	done := make(chan struct{})
 	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = ps.Close()
-		case <-done:
-		}
-	}()
+	go closeOnCancel(ctx, ps, done)
 
 	for {
 		msg, err := ps.Receive(ctx)
@@ -119,6 +113,16 @@ func (s *Source) session(ctx context.Context, out chan<- hint.Hint) (subscribed 
 		case *redis.Message:
 			s.forward(ctx, out, m)
 		}
+	}
+}
+
+// closeOnCancel closes ps when ctx ends before done is closed; Receive has
+// no other way to be unblocked.
+func closeOnCancel(ctx context.Context, ps *redis.PubSub, done <-chan struct{}) {
+	select {
+	case <-ctx.Done():
+		_ = ps.Close()
+	case <-done:
 	}
 }
 
