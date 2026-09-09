@@ -277,7 +277,22 @@ Default `go_*` and `process_*` collectors stay on.
 
 ## Deployment
 
-Run doorbell itself under a supervisor such as Docker so that it is restarted.
+Run doorbell itself under a supervisor such as systemd or Docker so that it is restarted.
+
+### Binaries
+
+Static binaries (linux/darwin, amd64/arm64) are attached to every
+[GitHub Release](https://github.com/lezhnev74/doorbell-pm/releases) with a `checksums.txt`:
+
+```sh
+curl -fsSLO https://github.com/lezhnev74/doorbell-pm/releases/download/v1.2.3/doorbell-pm_v1.2.3_linux_amd64.tar.gz
+tar -xzf doorbell-pm_v1.2.3_linux_amd64.tar.gz && install doorbell-pm /usr/local/bin/
+doorbell-pm run --config doorbell.yaml
+```
+
+`make dist` builds the same tarballs locally into `dist/`.
+
+### Docker
 
 The [`Dockerfile`](Dockerfile) builds a static binary into a distroless image. The image carries no shell and no PHP,
 so it is only useful when the worker command is available in the image; copy or bind-mount the worker into it or use the
