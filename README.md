@@ -302,3 +302,13 @@ make e2e      # needs redis-server or docker on PATH
 make lint     # golangci-lint, if installed
 make qa       # CRAP <= 6 per function, total coverage >= 85%
 ```
+
+CI runs all four on every push and pull request. `make qa` is the quality gate: every function must score
+[CRAP](https://testing.googleblog.com/2011/02/this-code-is-crap.html) (Change Risk Anti-Patterns,
+`cyclo^2 * (1 - coverage)^3 + cyclo`) at most 6, and total statement coverage must stay at or above 85%. Since CRAP is
+never below cyclomatic complexity, the bound means no function branches more than six ways, and a function with five
+branches needs at least two thirds of its statements covered. The point is not the number: small functions with one
+job are easy to read, easy to test and easy to change, and coverage tells you which one you forgot. Unit tests use fake
+clocks and fake spawners so they run in milliseconds and never flake; e2e tests drive the real binary against a real
+redis and cover the wiring the unit tests cannot. When a change trips the gate, split the function or write the test,
+do not raise the threshold.
