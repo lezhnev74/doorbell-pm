@@ -1,60 +1,65 @@
+# Every key doorbell-pm understands, set to its built-in default unless noted.
+# A key that is absent falls back to the default shown here. ${VAR} references
+# are expanded from the environment before the file is parsed. Unknown keys
+# are a startup error.
+
 log:
-  format: text
-  level: info
-  timestamp_format: "2006-01-02T15:04:05.000Z07:00"
+  format: text                                  # text or json; shape of every log line on stderr
+  level: info                                   # debug, info, warn, error; debug adds result_ignored and other traces
+  timestamp_format: "2006-01-02T15:04:05.000Z07:00"  # Go time layout for the time field, or "unix" for epoch seconds
 
 http:
-  enabled: true
-  addr: "127.0.0.1:8080"
-  hint_path: /hint
-  health_path: /healthz
-  metrics_path: /metrics
-  read_timeout: 5s
-  write_timeout: 5s
-  shutdown_timeout: 5s
+  enabled: true                                 # false disables the listener, /hint, /healthz and main-listener /metrics
+  addr: "127.0.0.1:8080"                        # bind address; use 0.0.0.0:8080 inside a container
+  hint_path: /hint                              # POST endpoint that accepts {"<prefix><channel>": <count>} hints
+  health_path: /healthz                         # GET endpoint that returns a per-pool snapshot
+  metrics_path: /metrics                        # GET endpoint for Prometheus text, on this listener or metrics.addr
+  read_timeout: 5s                              # slow request bodies are cut off after this
+  write_timeout: 5s                             # slow clients are cut off after this
+  shutdown_timeout: 5s                          # how long in-flight requests may finish during shutdown
 
 redis:
-  enabled: true
-  addr: "127.0.0.1:6379"
-  username: ""
-  password: "${REDIS_PASSWORD}"
-  db: 0
-  tls: false
-  channel_prefix: "jobs:"
-  dial_timeout: 5s
-  reconnect_min: 500ms
-  reconnect_max: 30s
+  enabled: true                                 # false disables the pub/sub source; then http must be enabled
+  addr: "127.0.0.1:6379"                        # host:port of the redis server
+  username: ""                                  # ACL user, empty for the default user
+  password: "${REDIS_PASSWORD}"                 # AUTH password; taken from the environment so it stays out of the file
+  db: 0                                         # logical database; pub/sub is global, so this only matters for AUTH/SELECT
+  tls: false                                    # true wraps the connection in TLS
+  channel_prefix: "jobs:"                       # PSUBSCRIBE <prefix>*; the suffix selects the pool by its channel
+  dial_timeout: 5s                              # give up on a connection attempt after this
+  reconnect_min: 500ms                          # first backoff after a lost connection
+  reconnect_max: 30s                            # backoff doubles per attempt up to this; messages sent meanwhile are lost
 
 metrics:
-  enabled: true
-  namespace: doorbell
-  addr: ""
+  enabled: true                                 # false registers nothing and /metrics answers 404
+  namespace: doorbell                           # prefix of every metric name, e.g. doorbell_running
+  addr: ""                                      # empty serves /metrics on http.addr; a host:port starts a separate listener
 
-shutdown_timeout: 60s
+shutdown_timeout: 60s                           # hard cap on the whole SIGINT/SIGTERM sequence; must exceed grace_shutdown
 
 pools:
-  _defaults:
-    concurrency: 1
-    ok_exit_codes: [0]
-    exit_failure_threshold: 3
-    exit_failure_window: 10s
-    exit_cooldown: 5s
-    exit_cooldown_max: 5m
-    exit_cooldown_multiplier: 2
-    ttl: 0
-    poke: 0
-    poke_count: 1
-    grace_shutdown: 30s
-    term_signal: SIGTERM
-    inherit_env: true
-    env: {}
-    dir: ""
-    result_stream: stdout
+  _defaults:                                    # reserved block: overrides the built-in default for every pool
+    concurrency: 1                              # max workers of a pool running at once; spawn = min(hint, concurrency - running)
+    ok_exit_codes: [0]                          # exit codes classified as ok; any other code is a failure for the breaker
+    exit_failure_threshold: 3                   # trip the breaker when this many failures fall inside exit_failure_window; 0 disables it
+    exit_failure_window: 10s                    # sliding window the failures are counted in
+    exit_cooldown: 5s                           # first pause after a trip, during which hints are dropped; 0 disables the breaker
+    exit_cooldown_max: 5m                       # pause never grows beyond this; also how long until the level resets untripped
+    exit_cooldown_multiplier: 2                 # pause grows by this factor per consecutive trip
+    ttl: 0                                      # kill a worker running longer than this with term_signal; 0 = no limit
+    poke: 0                                     # self-hint at this interval to recover from lost messages and cooldowns; 0 = off
+    poke_count: 1                               # count of each self-hint; must not exceed concurrency
+    grace_shutdown: 30s                         # time between term_signal and SIGKILL on ttl kill and shutdown
+    term_signal: SIGTERM                        # signal sent to the worker's process group first (HUP, INT, QUIT, KILL, USR1, USR2, TERM)
+    inherit_env: true                           # false starts workers with only the env map below
+    env: {}                                     # extra environment for workers; merged across layers, a pool key wins
+    dir: ""                                     # working directory of workers; empty inherits doorbell's
+    result_stream: stdout                       # where the worker prints its task count: stdout, stderr or none (no worker hints)
 
-  encoding:
-    enabled: true
-    channel: encoding
-    concurrency: 4
-    ttl: 10m
-    env: { PHP_MEMORY_LIMIT: 512M }
-    command: [php, worker.php, --queue=encoding, --drain]
+  encoding:                                     # pool name; must match ^[A-Za-z0-9][A-Za-z0-9_.-]*$
+    enabled: true                               # false ignores the pool: hints are dropped with reason=disabled and nothing spawns
+    channel: encoding                           # hint channel suffix after channel_prefix, so PUBLISH jobs:encoding; default = pool name
+    concurrency: 4                              # overrides _defaults for this pool only
+    ttl: 10m                                    # overrides _defaults for this pool only
+    env: { PHP_MEMORY_LIMIT: 512M }             # merged on top of _defaults.env
+    command: [php, worker.php, --queue=encoding, --drain]  # argv of one worker; required, not allowed in _defaults

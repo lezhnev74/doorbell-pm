@@ -1,4 +1,4 @@
-# Doorbell Process Manager (`doorbell-pm`)
+# 🔔 `doorbell-pm` Process Manager
 
 Most job runners want to own your queue, your retries and your worker code. Doorbell wants none of it. It is a small,
 predictable process spawner: your app publishes "there is work" and doorbell starts up to N copies of the command you
@@ -10,41 +10,33 @@ A deliberately dumb process spawner. It listens for work notifications (doorbell
 spawns worker processes up to a per-pool concurrency. Workers claim their own jobs from the database and exit whenever
 they decide to. Doorbell does not know what a job is, does not retry, and never restarts a worker on its own.
 
-Design notes live in [`orchestrator.md`](orchestrator.md); the step-by-step build log in
-[`dev_docs/implementation-plan.md`](dev_docs/implementation-plan.md).
-
 ## How it works
 
 ```
-Redis PUBLISH jobs:encoding 100      or      POST /hint {"jobs:encoding": 100}
-        |
-        v
-doorbell: running(encoding) = 1, concurrency = 4
-        -> spawn min(100, 4 - 1) = 3 processes with the pool's command
-        |
-        v
-workers claim jobs themselves and exit when done
+  [your app]  ---> hint via Redis or HTTP --->  doorbell  ---+---> worker
+                                                (cap: 2)     +---> worker
+```
+
+One pool per queue, one command per pool, a cap on how many run at once:
+
+```yaml
+pools:
+  encoding:                                   # PUBLISH jobs:encoding <n>
+    command: [ php, worker.php, --queue=encoding ]
+    concurrency: 4                            # never more than 4 at once
+    ttl: 10m                                  # kill a worker that runs longer
+    poke: 1m                                  # re-hint every minute in case a message was lost
+
+  mail:                                       # PUBLISH jobs:mail <n>
+    command: [ php, worker.php, --queue=mail ]
+    concurrency: 1
 ```
 
 Spawn rule per hint: `spawn = min(hint, concurrency - running)`. The hint is approximate; over- or under-spawning is
-fine because idle workers find no jobs and exit.
-
-### Worker contract
-
-A worker may print the number of tasks it processed as its last non-empty line on the pool's `result_stream` (default
-`stdout`): a non-negative integer of at most 64 bytes, anything else is ignored. On an `ok` exit with N > 0 doorbell
-hints the pool for N more workers (`source=worker`), so a worker that quit voluntarily (`--max-jobs`, quota) keeps a busy
-queue draining; exit 0 with `0` means "no work". A trailing log line on that stream silently disables the hint for that
-exit (`result_ignored` at debug is the only trace). Both child streams otherwise go to `/dev/null`. A worker that always
-exits 0 with N > 0 while doing nothing chains forever and the breaker never sees a failure; `result_stream: none` is the
-kill switch, `ttl` and `concurrency` bound the damage.
-
-Per pool doorbell also:
-
-- classifies every exit as `ok`, `failure` or `killed` and rate-limits churn with a breaker (below);
-- kills a worker after `ttl` (default forever);
-- optionally sends itself a hint every `poke` interval so a pool recovers even if a notification was lost;
-- on shutdown sends `term_signal`, waits `grace_shutdown`, then SIGKILLs the process group.
+fine because idle workers find no jobs and exit. A pool that keeps crashing is paused by a [breaker](#failure-breaker),
+and on shutdown every worker gets `term_signal`, then `grace_shutdown`, then SIGKILL.
+Every key with a one-line explanation of what it changes is in
+[`test/testdata/config/full.yaml`](test/testdata/config/full.yaml).
 
 ## Quick start
 
@@ -82,6 +74,16 @@ curl -X POST 127.0.0.1:8080/hint -d '{"jobs:encoding": 100}'
 ```
 
 `${ENV_VAR}` in the yaml is expanded before parsing, so secrets such as `redis.password` stay out of the file.
+
+## Worker contract
+
+A worker may print the number of tasks it processed as its last non-empty line on the pool's `result_stream` (default
+`stdout`): a non-negative integer of at most 64 bytes, anything else is ignored. On an `ok` exit with N > 0 doorbell
+hints the pool for N more workers (`source=worker`), so a worker that quit voluntarily (`--max-jobs`, quota) keeps a busy
+queue draining; exit 0 with `0` means "no work". A trailing log line on that stream silently disables the hint for that
+exit (`result_ignored` at debug is the only trace). Both child streams otherwise go to `/dev/null`. A worker that always
+exits 0 with N > 0 while doing nothing chains forever and the breaker never sees a failure; `result_stream: none` is the
+kill switch, `ttl` and `concurrency` bound the damage.
 
 ## Hint sources
 
@@ -288,25 +290,7 @@ A full example with every key is in [`test/testdata/config/full.yaml`](test/test
 
 ## Deployment
 
-Run doorbell itself under systemd or Docker so that it is supervised.
-
-### systemd
-
-[`deploy/doorbell-pm.service`](deploy/doorbell-pm.service):
-
-```sh
-useradd -r -s /usr/sbin/nologin doorbell-pm
-install -m 0755 bin/doorbell-pm /usr/local/bin/doorbell-pm
-install -d -m 0750 -o root -g doorbell-pm /etc/doorbell-pm
-install -m 0640 -o root -g doorbell-pm doorbell.yaml /etc/doorbell-pm/doorbell.yaml
-install -m 0644 deploy/doorbell-pm.service /etc/systemd/system/doorbell-pm.service
-systemctl daemon-reload && systemctl enable --now doorbell-pm
-```
-
-The unit sends SIGTERM and waits `TimeoutStopSec`, which must exceed the config `shutdown_timeout`. Doorbell logs to
-stderr, so journald collects it. `KillMode=mixed` lets doorbell terminate its own children first.
-
-### Docker
+Run doorbell itself under a supervisor such as Docker so that it is restarted.
 
 The [`Dockerfile`](Dockerfile) builds a static binary into a distroless image. The image carries no shell and no PHP,
 so it is only useful when the worker command is available in the image; copy or bind-mount the worker into it or use the
