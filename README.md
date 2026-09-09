@@ -298,4 +298,5 @@ is honoured.
 make test     # go test -race ./...
 make e2e      # needs redis-server or docker on PATH
 make lint     # golangci-lint, if installed
+make qa       # CRAP <= 6 per function, total coverage >= 85%
 ```
