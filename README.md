@@ -303,6 +303,57 @@ docker run --rm -v $PWD/doorbell.yaml:/app/doorbell.yaml:ro -p 8080:8080 ghcr.io
 Set `http.addr` to `0.0.0.0:8080` in a container. Stop with `docker stop -t <shutdown_timeout+5>` so the grace period
 is honoured.
 
+### docker compose
+
+Workers need a runtime, so the usual layout is a worker image with the doorbell binary copied in from the GHCR image:
+
+```dockerfile
+# Dockerfile.worker
+FROM ghcr.io/lezhnev74/doorbell-pm:1 AS doorbell
+FROM php:8.4-cli
+COPY --from=doorbell /usr/local/bin/doorbell-pm /usr/local/bin/doorbell-pm
+WORKDIR /app
+COPY . .
+ENTRYPOINT ["doorbell-pm"]
+CMD ["run", "--config", "/app/doorbell.yaml"]
+```
+
+```yaml
+# compose.yaml
+services:
+  redis:
+    image: redis:7-alpine
+
+  doorbell:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    depends_on: [ redis ]
+    restart: unless-stopped
+    stop_grace_period: 65s              # shutdown_timeout + 5s
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    ports:
+      - "8080:8080"                     # /hint, /healthz, /metrics
+```
+
+```yaml
+# doorbell.yaml
+http:
+  addr: 0.0.0.0:8080
+redis:
+  addr: redis:6379
+  password: "${REDIS_PASSWORD}"
+shutdown_timeout: 60s
+pools:
+  encoding:
+    command: [ php, worker.php, --queue=encoding ]
+    concurrency: 4
+```
+
+`docker compose up -d --build`, then `redis-cli -h <host> PUBLISH jobs:encoding 10` or `curl -XPOST localhost:8080/hint
+-d '{"jobs:encoding":10}'` to see workers appear.
+
 ## Development
 
 ```sh
