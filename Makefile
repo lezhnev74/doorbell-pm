@@ -1,7 +1,9 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  = -s -w -X main.version=$(VERSION)
+IMAGE   ?= ghcr.io/lezhnev74/doorbell-pm
+PLATFORMS ?= linux/amd64,linux/arm64
 
-.PHONY: build test e2e lint vet cover qa clean
+.PHONY: build test e2e lint vet cover qa clean image image-push release
 
 build:
 	mkdir -p bin
@@ -28,3 +30,20 @@ qa: cover
 
 clean:
 	rm -rf bin cover.out
+
+# Local single-arch image, tagged with the current version.
+image:
+	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(VERSION) -t $(IMAGE):latest .
+
+# Manual multi-arch push; needs `docker login ghcr.io` first. CI does this on tags.
+image-push:
+	docker buildx build --platform $(PLATFORMS) --build-arg VERSION=$(VERSION) \
+		-t $(IMAGE):$(VERSION) -t $(IMAGE):latest --push .
+
+# Tag and push; the Release workflow builds and publishes the image.
+# Usage: make release VERSION=v1.2.3
+release:
+	@case "$(VERSION)" in v[0-9]*) ;; *) echo "usage: make release VERSION=vX.Y.Z"; exit 1;; esac
+	@test -z "$$(git status --porcelain)" || { echo "working tree is dirty"; exit 1; }
+	git tag -a $(VERSION) -m "$(VERSION)"
+	git push origin $(VERSION)

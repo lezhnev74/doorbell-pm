@@ -14,6 +14,9 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}"
     && mkdir -p /app
 
 FROM gcr.io/distroless/static-debian12:nonroot
+LABEL org.opencontainers.image.source="https://github.com/lezhnev74/doorbell-pm" \
+      org.opencontainers.image.description="On-demand worker process spawner" \
+      org.opencontainers.image.licenses="MIT"
 COPY --from=build /doorbell-pm /usr/local/bin/doorbell-pm
 COPY --from=build --chown=nonroot:nonroot /app /app
 WORKDIR /app

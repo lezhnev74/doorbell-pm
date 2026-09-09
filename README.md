@@ -286,9 +286,18 @@ image as a base.
 The working directory is `/app`, owned by `nonroot`, and the config is expected at `/app/doorbell.yaml`. Relative
 paths in the config resolve against `/app`.
 
+Prebuilt images (linux/amd64, linux/arm64) are published to GHCR on every release tag:
+
 ```sh
-docker build -t doorbell-pm .
-docker run --rm -v $PWD/doorbell.yaml:/app/doorbell.yaml:ro -p 8080:8080 doorbell-pm
+docker pull ghcr.io/lezhnev74/doorbell-pm:latest      # or :1, :1.2, :1.2.3
+docker run --rm -v $PWD/doorbell.yaml:/app/doorbell.yaml:ro -p 8080:8080 ghcr.io/lezhnev74/doorbell-pm
+```
+
+Or build locally:
+
+```sh
+make image    # ghcr.io/lezhnev74/doorbell-pm:<git describe>, also tagged :latest
+docker run --rm -v $PWD/doorbell.yaml:/app/doorbell.yaml:ro -p 8080:8080 ghcr.io/lezhnev74/doorbell-pm
 ```
 
 Set `http.addr` to `0.0.0.0:8080` in a container. Stop with `docker stop -t <shutdown_timeout+5>` so the grace period
@@ -300,6 +309,7 @@ is honoured.
 make test     # go test -race ./...
 make e2e      # needs redis-server or docker on PATH
 make lint     # golangci-lint, if installed
+make release VERSION=v1.2.3   # tag + push; CI publishes the image
 make qa       # CRAP <= 6 per function, total coverage >= 85%
 ```
 
@@ -312,3 +322,7 @@ job are easy to read, easy to test and easy to change, and coverage tells you wh
 clocks and fake spawners so they run in milliseconds and never flake; e2e tests drive the real binary against a real
 redis and cover the wiring the unit tests cannot. When a change trips the gate, split the function or write the test,
 do not raise the threshold.
+
+## License
+
+[MIT](LICENSE)
