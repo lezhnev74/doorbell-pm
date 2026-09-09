@@ -1,5 +1,7 @@
 # 🔔 `doorbell-pm` Process Manager
 
+[![CI](https://github.com/lezhnev74/doorbell-pm/actions/workflows/ci.yml/badge.svg)](https://github.com/lezhnev74/doorbell-pm/actions/workflows/ci.yml)
+
 > Ring the bell, workers show up. Doorbell spawns worker processes on demand and gets out of the way.
 
 Most job runners want to own your queue, your retries and your worker code. Doorbell wants none of it. It is a small,
