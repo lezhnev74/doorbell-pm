@@ -19,4 +19,4 @@ COPY --from=build --chown=nonroot:nonroot /app /app
 WORKDIR /app
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/doorbell-pm"]
-CMD ["-config", "/app/doorbell.yaml"]
+CMD ["run", "--config", "/app/doorbell.yaml"]

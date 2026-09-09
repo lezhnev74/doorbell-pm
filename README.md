@@ -42,12 +42,13 @@ Every key with a one-line explanation of what it changes is in
 
 ```sh
 make build
-./bin/doorbell-pm -check -config doorbell.yaml     # validate and print the resolved config
-./bin/doorbell-pm -config doorbell.yaml
+./bin/doorbell-pm check --config doorbell.yaml     # validate and print the resolved config
+./bin/doorbell-pm run --config doorbell.yaml
 ```
 
-Flags: `-config <path>` (required), `-check` (validate, print resolved config, exit), `-version`. Exit code 0 on a clean
-stop, 1 on config or runtime error, 2 on bad flags. SIGINT or SIGTERM starts a graceful shutdown.
+Commands: `run --config <path>`, `check --config <path>` (validate, print resolved config, exit), `version`;
+`-c` is short for `--config`, `--help` works on every command. Exit code 0 on a clean stop, 1 on config or runtime
+error, 2 on bad flags or usage. SIGINT or SIGTERM starts a graceful shutdown.
 
 Minimal config:
 

@@ -14,7 +14,7 @@ import (
 
 func TestRunVersion(t *testing.T) {
 	var out, errOut bytes.Buffer
-	if code := run([]string{"-version"}, &out, &errOut); code != 0 {
+	if code := run([]string{"version"}, &out, &errOut); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 	if got, want := out.String(), "doorbell-pm dev\n"; got != want {
@@ -22,20 +22,46 @@ func TestRunVersion(t *testing.T) {
 	}
 }
 
-func TestRunUnknownFlag(t *testing.T) {
-	var out, errOut bytes.Buffer
-	if code := run([]string{"-bogus"}, &out, &errOut); code != 2 {
-		t.Fatalf("exit code = %d, want 2", code)
+func TestRunUsageErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string // substring of stderr
+	}{
+		{"no args", nil, "COMMANDS:"},
+		{"unknown flag", []string{"--bogus"}, "flag provided but not defined: -bogus"},
+		{"unknown verb", []string{"bogus"}, `unknown command "bogus"`},
+		{"run without config", []string{"run"}, "--config is required"},
+		{"check unknown flag", []string{"check", "--bogus"}, "flag provided but not defined: -bogus"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			if code := run(tc.args, &out, &errOut); code != 2 {
+				t.Fatalf("exit code = %d, want 2\n%s", code, errOut.String())
+			}
+			if !strings.Contains(errOut.String(), tc.want) {
+				t.Fatalf("stderr = %q, want %q", errOut.String(), tc.want)
+			}
+			if strings.Count(errOut.String(), "doorbell-pm: ") > 1 {
+				t.Fatalf("diagnostic printed twice:\n%s", errOut.String())
+			}
+			if out.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", out.String())
+			}
+		})
 	}
 }
 
-func TestRunRequiresConfig(t *testing.T) {
-	var out, errOut bytes.Buffer
-	if code := run(nil, &out, &errOut); code != 2 {
-		t.Fatalf("exit code = %d, want 2", code)
-	}
-	if !strings.Contains(errOut.String(), "-config is required") {
-		t.Fatalf("stderr = %q", errOut.String())
+func TestRunHelpGoesToStdout(t *testing.T) {
+	for _, args := range [][]string{{"--help"}, {"run", "--help"}, {"check", "-h"}} {
+		var out, errOut bytes.Buffer
+		if code := run(args, &out, &errOut); code != 0 {
+			t.Fatalf("%v: exit code = %d, want 0", args, code)
+		}
+		if !strings.Contains(out.String(), "USAGE:") || errOut.Len() != 0 {
+			t.Fatalf("%v: stdout = %q, stderr = %q", args, out.String(), errOut.String())
+		}
 	}
 }
 
@@ -45,18 +71,37 @@ func TestRunBadConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, errOut bytes.Buffer
-	if code := run([]string{"-config", path, "-check"}, &out, &errOut); code != 1 {
+	if code := run([]string{"check", "--config", path}, &out, &errOut); code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
-	if !strings.Contains(errOut.String(), "at least one enabled pool") {
+	if !strings.Contains(errOut.String(), "doorbell-pm: ") || !strings.Contains(errOut.String(), "at least one enabled pool") {
 		t.Fatalf("stderr = %q", errOut.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want nothing printed before the error", out.String())
+	}
+}
+
+func TestRunConfigFlagForms(t *testing.T) {
+	t.Setenv("REDIS_PASSWORD", "hunter2")
+	for _, args := range [][]string{
+		{"check", "--config=../../test/testdata/config/full.yaml"},
+		{"check", "-c", "../../test/testdata/config/full.yaml"},
+	} {
+		var out, errOut bytes.Buffer
+		if code := run(args, &out, &errOut); code != 0 {
+			t.Fatalf("%v: exit code = %d, want 0\n%s", args, code, errOut.String())
+		}
+		if !strings.Contains(out.String(), "pools:") {
+			t.Fatalf("%v: stdout = %q", args, out.String())
+		}
 	}
 }
 
 func TestRunCheckPrintsResolvedConfig(t *testing.T) {
 	t.Setenv("REDIS_PASSWORD", "hunter2")
 	var out, errOut bytes.Buffer
-	if code := run([]string{"-config", "../../test/testdata/config/full.yaml", "-check"}, &out, &errOut); code != 0 {
+	if code := run([]string{"check", "--config", "../../test/testdata/config/full.yaml"}, &out, &errOut); code != 0 {
 		t.Fatalf("exit code = %d, want 0\n%s", code, errOut.String())
 	}
 	got := out.String()

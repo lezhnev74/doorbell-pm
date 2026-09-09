@@ -65,7 +65,7 @@ func startDoorbell(t *testing.T, cfg string) *doorbell {
 
 	d := &doorbell{
 		t:          t,
-		cmd:        exec.Command(doorbellBin, "-config", cfgPath),
+		cmd:        exec.Command(doorbellBin, "run", "--config", cfgPath),
 		baseURL:    "http://" + httpAddr,
 		metricsURL: "http://" + metricsAddr,
 		workerLog:  workerLog,

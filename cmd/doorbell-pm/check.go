@@ -10,7 +10,7 @@ import (
 	"doorbell-pm/internal/config"
 )
 
-// resolved is the -check output: every top-level block with defaults
+// resolved is the check output: every top-level block with defaults
 // applied and every pool flattened through the three layers, in yaml so it
 // can be diffed against the input file.
 type resolved struct {

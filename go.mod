@@ -7,6 +7,7 @@ require (
 	github.com/goccy/go-yaml v1.18.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/redis/go-redis/v9 v9.22.0
+	github.com/urfave/cli/v3 v3.11.0
 )
 
 require (
